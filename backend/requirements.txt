@@ -4,5 +4,7 @@ google-generativeai
 pydantic
 pydantic-settings
 python-dotenv
-PyJWT
+python-jose[cryptography]
+requests
 httpx
+supabase

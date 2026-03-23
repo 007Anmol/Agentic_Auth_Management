@@ -2,21 +2,22 @@ from fastapi import FastAPI, Depends, HTTPException, status, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import jwt
 import os
+from typing import Optional
 from dotenv import load_dotenv
+from jose import ExpiredSignatureError, JWTError
 
 from models import ChatRequest, ChatResponse
 from agent import process_agent_message
+from services.auth_service import JWKSFetchError, verify_supabase_jwt
 
 # Load Environment Variables
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET") # Or Supabase JWT secret from settings
 
-if not SUPABASE_URL or not SUPABASE_JWT_SECRET:
-    print("WARNING: Supabase credentials missing. Mocking auth locally.")
+if not SUPABASE_URL:
+    print("WARNING: SUPABASE_URL missing. Mocking auth locally.")
 
 app = FastAPI(title="Agentic Auth Management backend")
 
@@ -29,26 +30,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
+def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Security(security)):
     """
     Validates the Supabase JWT token and extracts the user ID.
     This ensures that the LLM tools strictly act on the authenticated user.
     """
-    token = credentials.credentials
-    if not SUPABASE_JWT_SECRET:
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token.",
+        )
+
+    auth_scheme = (credentials.scheme or "").lower()
+    if auth_scheme != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication scheme. Expected Bearer token.",
+        )
+
+    token = (credentials.credentials or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication token.",
+        )
+
+    if not SUPABASE_URL:
         # Fallback for local testing without Supabase configured yet
         return "test_user_123"
         
     try:
-        # Decode the JWT securely
-        payload = jwt.decode(
-            token, 
-            SUPABASE_JWT_SECRET, 
-            algorithms=["HS256"], 
-            options={"verify_aud": False} # Supabase aud can vary (authenticated)
-        )
+        payload = verify_supabase_jwt(token)
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(
@@ -56,7 +70,17 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
                 detail="Invalid authentication credentials (no sub in token)",
             )
         return user_id
-    except jwt.PyJWTError as e:
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed: token has expired",
+        )
+    except JWKSFetchError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: {str(e)}",
+        )
+    except JWTError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Authentication failed: {str(e)}",
